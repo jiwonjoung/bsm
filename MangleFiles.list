@@ -1,0 +1,11 @@
+[
+ [
+  ["DSRC_ExitService.[ch]",
+   "DSRC_GenericSignage.[ch]",
+   "DSRC_SpeedLimit.[ch]",
+   "DSRC_ITIScodesAndText.[ch]",
+   "DSRC_WorkZone.[ch]"],
+  [["(item_PR)","%filename%_\\1"],
+   ["(struct|union) item","\\1 %filename%_item"]]
+ ]
+]

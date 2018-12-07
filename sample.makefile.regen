@@ -1,0 +1,216 @@
+#!/bin/bash
+#
+# This script attempts to compile the given ASN.1 specification and then
+# transforms the resulting Makefile.am.sample tailored to that specification
+# into a customized Makefile.
+#
+# The information which is necessary for this script is passed from the
+# Makefile which is going to be replaced with an updated Makefile.
+# This is called "boot-strapping" and is frequently the source of inside jokes.
+#
+# $Id: sample.makefile.regen 1370 2007-06-29 15:33:33Z vlm $
+#
+
+if test -z "$ASN1PDU"	\
+ -o  -z "$ASN1MODULES"	\
+ -o  -z "$PROGNAME"	\
+; then
+  echo "ASN1CPREFIX=\"$ASN1PREFIX\""
+  echo "ASN1CMDOPTS=\"$ASN1CMDOPTS\""
+	echo "ASN1MODULES=\"$ASN1MODULES\""
+	echo "ASN1PDU=\"$ASN1PDU\""
+	echo "PROGNAME=\"$PROGNAME\""
+	echo "ASN1PDU, ASN1MODULES, and PROGNAME are mandatory"
+	exit
+fi
+
+if test -n "$ASN1PREFIX" ; then
+  export ASN1C_PREFIX="$ASN1PREFIX"
+fi
+
+CMDOPTS="-pdu=${ASN1PDU} ${ASN1CMDOPTS} ${ASN1MODULES}"
+LCL_ASN_DIR="../../../../tools/asn1c"
+LCL_ASN_CMP="${LCL_ASN_DIR}/asn1c/asn1c"
+LCL_ASN_SKEL="${LCL_ASN_DIR}/skeletons"
+
+if test -x ${LCL_ASN_CMP} ; then
+  echo "Compiling ${ASN1MODULES} using local compiler"
+  ${LCL_ASN_CMP} -S ${LCL_ASN_SKEL} ${CMDOPTS} || exit $?
+else
+  make -C ${LCL_ASN_DIR}/..
+  if test -x ${LCL_ASN_CMP} ; then
+    echo "Compiling ${ASN1MODULES} using local compiler (after building it)"
+    ${LCL_ASN_CMP} -S ${LCL_ASN_SKEL} ${CMDOPTS} || exit $?
+  else
+    echo "Compiling ${ASN1MODULES} using system compiler"
+    asn1c ${CMDOPTS} || exit $?
+  fi
+fi
+
+export -n ASN1C_PREFIX
+
+if test ! -f Makefile.am.sample ; then
+	echo "Makefile.am.sample is missing"
+	exit 1
+fi
+
+#EXTRA_CFLAGS="-DJUNKTEST"
+test -f config.h && EXTRA_CFLAGS="-DHAVE_CONFIG_H ${EXTRA_CFLAGS}"
+test -n "$TITLE" && EXTRA_CFLAGS="-DASN_CONVERTER_TITLE=\"$TITLE\" ${EXTRA_CFLAGS}"
+
+(
+    echo "default: libbsm.a"
+    echo
+    echo "rebuild:"
+    echo '	$(MAKE) clean'
+    echo '	$(MAKE) regen-makefile'
+    echo '	$(MAKE)'
+    echo '	$(MAKE) clean'
+    echo '	$(MAKE) mk5'
+    echo
+    echo "CFLAGS+=-Werror -Wall -I.. -I../../../../ieee1609/kernel/include/ -I../../../../cohda/kernel/include/"
+    echo
+    echo '# Comment/uncomment the following line to disable/enable debugging'
+    echo 'DEBUG = y'
+    echo 'ifeq ($(DEBUG),y)'
+    echo '  # "-O" is needed to expand inlines'
+    echo '  CFLAGS += -O -g -DDEBUG '
+    echo 'else'
+    echo 'CFLAGS += -O2'
+    echo 'endif'
+    echo
+    echo '# If using yocto/poky toolchain, use CC in environment'
+    echo 'ifneq ($(TARGET_PREFIX),arm-poky-linux-gnueabi-)'
+    echo '  CC = $(CROSS_COMPILE)gcc'
+    echo 'endif'
+    echo 'AR = $(CROSS_COMPILE)ar'
+    echo
+) > Makefile.$$
+
+set -x
+cat Makefile.am.sample						\
+	| sed -e "s/^CFLAGS += /CFLAGS += ${EXTRA_CFLAGS} /"	\
+	| sed -e "s/^all: /all: ${ASN1PDU}.c /"			\
+	| sed -e "s/^clean:/clean: clean-extra/"			\
+	| sed -e "s/^regenerate-from-asn1-source:/regenerate-from-asn1-source-ORIG:/" \
+	| sed -e "s/progname/${PROGNAME}/"			\
+	>> Makefile.$$
+set +x
+
+(	echo
+        echo 'LIB_OBJS=${ASN_MODULE_SOURCES:.c=.o}'
+        echo
+        echo 'ARCH ?= $(shell uname --machine)'
+        echo
+        echo 'libbsm.a: $(LIB_OBJS)'
+	echo '	$(AR) rcs $@ $^'
+	echo '	cp $@ libbsm-$(ARCH).a'
+        echo
+        echo 'clean-extra:'
+	echo '	rm -f libbsm.a'
+	echo '	rm -f $(LIB_OBJS)'
+	echo '	rm -f *.orig'
+	echo '	rm -f .Makefile.*.old'
+        echo
+	echo "regenerate-from-asn1-source: regenerate-from-asn1-source-ORIG mangle"
+        echo
+	echo "mangle:"
+	echo "	../MangleFiles.py --clobber --verbose -- ../MangleFiles.list"
+	echo
+	echo "${ASN1PDU}.c: $0 ${ASN1MODULES}"
+	echo "	\$(MAKE) regen-makefile"
+	echo "	@touch ${ASN1PDU}.c"
+	echo "	\$(MAKE)"
+	echo
+	echo "regen-makefile:"
+	echo '	cp Makefile .Makefile.$$.old'
+	test -n "$TITLE" && echo "	TITLE=\"$TITLE\" \\"
+	echo "	ASN1CMDOPTS=\"${ASN1CMDOPTS}\" \\"
+	echo "	ASN1MODULES=\"${ASN1MODULES}\" \\"
+	echo "	ASN1PDU=${ASN1PDU} \\"
+	echo "	PROGNAME=${PROGNAME} \\"
+	echo "	$0"
+	echo '	$(MAKE) mangle'
+	echo
+	echo 'check: ${TARGET} check-ber check-xer check-per'
+	echo '	@echo ================'
+	echo '	@echo All tests passed'
+	echo '	@echo ================'
+	echo
+	echo 'check-ber:'
+	echo "	@if test -f sample-${ASN1PDU}-1.[db]er ; then \\"
+	echo "	for f in sample-${ASN1PDU}-*.[db]er; do \\"
+	echo '	for b in 1 17 33 980 8192; do \'
+	echo '	echo "Recoding $$f into XER and back ($$b)..."; \'
+	echo '	./${TARGET} -b $$b -iber -oxer $$f > ./.tmp.1.$$$$ || exit 2; \'
+	echo '	./${TARGET} -b $$b -ixer -oxer ./.tmp.1.$$$$ > ./.tmp.2.$$$$ || exit 3; \'
+	echo '	diff ./.tmp.1.$$$$ ./.tmp.2.$$$$ || exit 4; \'
+	echo '	rm -f ./.tmp.[12].$$$$; \'
+	echo '	echo "Test junking $$f (please wait)..."; \'
+	echo '	./${TARGET} -J0.0001 -n 1000 -b $$b -iber -onull $$f || exit 5; \'
+	echo '	./${TARGET} -J0.001 -n 1000 -b $$b -iber -onull $$f || exit 6; \'
+	echo '	done; done; fi'
+	echo
+	echo 'check-xer:'
+	echo "	@if test -f sample-${ASN1PDU}-1.xer ; then \\"
+	echo "	for f in sample-${ASN1PDU}-*.xer; do \\"
+	echo '	for b in 1 17 33 980 8192; do \'
+	echo '	echo "Recoding $$f into DER and back ($$b)..."; \'
+	echo '	./${TARGET} -b $$b -ixer -oder $$f > ./.tmp.1.$$$$ || exit 2; \'
+	echo '	./${TARGET} -b $$b -iber -oxer ./.tmp.1.$$$$ > ./.tmp.2.$$$$ || exit 3; \'
+	echo '	diff $$f ./.tmp.2.$$$$ || exit 4; \'
+	echo '	rm -f ./.tmp.[12].$$$$; \'
+	echo '	echo "Test junking $$f (please wait)..."; \'
+	echo '	./${TARGET} -J0.0001 -n 1000 -b $$b -ixer -onull $$f || exit 5; \'
+	echo '	./${TARGET} -J0.001 -n 1000 -b $$b -ixer -onull $$f || exit 6; \'
+	echo '	done; done; fi'
+	echo
+	echo 'check-per:'
+	echo "	@if test -f sample-${ASN1PDU}-1-nopad.per ; then \\"
+	echo "	for f in sample-${ASN1PDU}-[1-9]-nopad.per; do \\"
+	echo '	for b in 1 17 33 980 8192; do \'
+	echo '	echo "Recoding non-padded $$f into DER into XER and back ($$b)..."; \'
+	echo '	./${TARGET} -b $$b -per-nopad -iper -oder $$f > ./.tmp.1.$$$$ || exit 2; \'
+	echo '	./${TARGET} -b $$b -iber -oxer ./.tmp.1.$$$$ > ./.tmp.2.$$$$ || exit 3; \'
+	echo '	./${TARGET} -b $$b -ixer -oder ./.tmp.2.$$$$ > ./.tmp.3.$$$$ || exit 4; \'
+	echo '	diff ./.tmp.1.$$$$ ./.tmp.3.$$$$ || exit 5; \'
+	echo '	rm -f ./.tmp.[123].$$$$; \'
+	echo '	echo "Test junking $$f (please wait)..."; \'
+	echo '	./${TARGET} -J0.0001 -n 1000 -b $$b -per-nopad -iper -onull $$f || exit 6; \'
+	echo '	./${TARGET} -J0.001 -n 1000 -b $$b -per-nopad -iper -onull $$f || exit 7; \'
+	echo '	done; done; fi'
+	echo "	@if test -f sample-${ASN1PDU}-1.per ; then \\"
+	echo "	for f in sample-*-[1-9].per; do \\"
+	echo '	pdu=`echo $$f | sed -E -e "s/sample-([A-Za-z-]+)-[0-9].*/\\1/"`; \'
+	echo '	for b in 1 17 33 980 8192; do \'
+	echo '	echo "Recoding $$f into DER into XER and back ($$b)..."; \'
+	echo '	./${TARGET} -b $$b -p $$pdu -iper -oder $$f > ./.tmp.1.$$$$ || exit 3; \'
+	echo '	./${TARGET} -b $$b -p $$pdu -iber -oxer ./.tmp.1.$$$$ > ./.tmp.2.$$$$ || exit 4; \'
+	echo '	./${TARGET} -b $$b -p $$pdu -ixer -oper ./.tmp.2.$$$$ > ./.tmp.1.$$$$ || exit 5; \'
+	echo '	diff $$f ./.tmp.1.$$$$ || exit 6; \'
+	echo '	rm -f ./.tmp.[12].$$$$; \'
+	echo '	echo "Test junking $$f (please wait)..."; \'
+	echo '	./${TARGET} -J0.0001 -n 1000 -b $$b -iper -onull $$f || exit 7; \'
+	echo '	./${TARGET} -J0.001 -n 1000 -b $$b -iper -onull $$f || exit 8; \'
+	echo '	done; done; fi'
+	echo
+	echo "distclean: clean"
+	echo '	rm -f $(ASN_MODULE_SOURCES)'
+	echo '	rm -f $(ASN_MODULE_HEADERS)'
+	echo '	rm -f $(ASN_CONVERTER_SOURCES) $(ASN_CONVERTER_HEADERS)'
+	echo "	rm -f Makefile.am.sample"
+	echo '	rm -f libbsm*.a'
+        echo
+	echo "mk5:"
+	echo '	env BOARD=$@ ARCH=arm CROSS_COMPILE="ccache arm-linux-gnueabihf-" $(MAKE)'
+
+        echo
+) >> Makefile.$$
+
+set -x
+mv Makefile.$$ Makefile || exit $?
+rm Makefile.am.sample || exit $?
+set +x
+
+echo
+echo "Makefile generation finished"
